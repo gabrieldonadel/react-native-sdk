@@ -24,6 +24,7 @@ import {
   IterableLogLevel,
 } from '../..';
 import { TestHelper } from '../../__tests__/TestHelper';
+import { IterableLogger } from './IterableLogger';
 
 describe('Iterable', () => {
   beforeEach(() => {
@@ -335,7 +336,7 @@ describe('Iterable', () => {
       expect(config.urlHandler).toBe(undefined);
       expect(config.useInMemoryStorageForInApps).toBe(false);
       expect(config.androidWakeDelayMs).toBe(1000);
-      expect(config.authCallbackTimeoutMs).toBe(1000);
+      expect(config.authCallbackTimeoutMs).toBe(6000);
       const configDict = config.toDict();
       expect(configDict.allowedProtocols).toEqual([]);
       expect(configDict.androidSdkUseInMemoryStorageForInApps).toBe(false);
@@ -353,7 +354,7 @@ describe('Iterable', () => {
       expect(configDict.urlHandlerPresent).toBe(false);
       expect(configDict.useInMemoryStorageForInApps).toBe(false);
       expect(configDict.androidWakeDelayMs).toBe(1000);
-      expect(configDict.authCallbackTimeoutMs).toBe(1000);
+      expect(configDict.authCallbackTimeoutMs).toBe(6000);
     });
 
     it('should allow overriding androidWakeDelayMs and authCallbackTimeoutMs', () => {
@@ -1801,9 +1802,12 @@ describe('Iterable', () => {
         IterableEventName.handleAuthFailureCalled
       );
 
-      // sets up config with authHandler that returns an AuthResponse
+      // sets up config with authHandler that returns an AuthResponse and a
+      // short safety-net timeout (default is 6000ms; we use 200ms here so
+      // the safety-net fires within the test window).
       const config = new IterableConfig();
       config.logReactNativeSdkCalls = false;
+      config.authCallbackTimeoutMs = 200;
       const successCallback = jest.fn();
       const failureCallback = jest.fn();
       const authResponse = new IterableAuthResponse();
@@ -1819,7 +1823,7 @@ describe('Iterable', () => {
       nativeEmitter.emit(IterableEventName.handleAuthCalled);
 
       // THEN the token is forwarded and neither callback fires
-      return await TestHelper.delayed(1100, () => {
+      return await TestHelper.delayed(300, () => {
         expect(MockRNIterableAPI.passAlongAuthToken).toBeCalledWith(
           'timeout-token'
         );
@@ -1903,6 +1907,95 @@ describe('Iterable', () => {
         );
         expect(successCallback).toBeCalled();
         expect(failureCallback).not.toBeCalled();
+      });
+    });
+
+    it('should resolve both callbacks when two handleAuthCalled invocations overlap (SDK-520 regression)', async () => {
+      // Regression for the shared-latch-state bug: when a second
+      // handleAuthCalled event arrives while the first invocation's race is
+      // still pending, the original code wiped the first invocation's
+      // resolver, so the first successCallback was silently dropped. With
+      // per-invocation latch state, both invocations must resolve.
+      const nativeEmitter = new NativeEventEmitter();
+      nativeEmitter.removeAllListeners(IterableEventName.handleAuthCalled);
+      nativeEmitter.removeAllListeners(
+        IterableEventName.handleAuthSuccessCalled
+      );
+      nativeEmitter.removeAllListeners(
+        IterableEventName.handleAuthFailureCalled
+      );
+
+      const config = new IterableConfig();
+      config.logReactNativeSdkCalls = false;
+      config.authCallbackTimeoutMs = 2000;
+
+      const successCallback1 = jest.fn();
+      const failureCallback1 = jest.fn();
+      const authResponse1 = new IterableAuthResponse();
+      authResponse1.authToken = 'overlap-token-1';
+      authResponse1.successCallback = successCallback1;
+      authResponse1.failureCallback = failureCallback1;
+
+      const successCallback2 = jest.fn();
+      const failureCallback2 = jest.fn();
+      const authResponse2 = new IterableAuthResponse();
+      authResponse2.authToken = 'overlap-token-2';
+      authResponse2.successCallback = successCallback2;
+      authResponse2.failureCallback = failureCallback2;
+
+      // Use controllable promises so we can wire both latches before any
+      // native success event arrives. This is the realistic overlap shape:
+      // the SDK is awaiting native auth round-trips for two back-to-back
+      // handleAuthCalled events.
+      let resolveAuth1: (value: IterableAuthResponse) => void = () => {};
+      let resolveAuth2: (value: IterableAuthResponse) => void = () => {};
+      let callCount = 0;
+      config.authHandler = jest.fn(() => {
+        callCount += 1;
+        return new Promise<IterableAuthResponse>((resolve) => {
+          if (callCount === 1) {
+            resolveAuth1 = resolve;
+          } else {
+            resolveAuth2 = resolve;
+          }
+        });
+      });
+
+      const logSpy = jest.spyOn(IterableLogger, 'log');
+
+      Iterable.initialize('apiKey', config);
+
+      // WHEN two handleAuthCalled events fire back-to-back (both invocations
+      // are now pending and awaiting their authHandler promises).
+      nativeEmitter.emit(IterableEventName.handleAuthCalled);
+      nativeEmitter.emit(IterableEventName.handleAuthCalled);
+
+      // Resolve both authHandler promises. After the microtask queue
+      // flushes, both invocations' latches are wired and racing their
+      // safety-net timers. We defer the native success emissions to the
+      // next tick so the latch executors have run.
+      resolveAuth1(authResponse1);
+      resolveAuth2(authResponse2);
+
+      // Then the corresponding native success events arrive in FIFO order.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      nativeEmitter.emit(IterableEventName.handleAuthSuccessCalled);
+      nativeEmitter.emit(IterableEventName.handleAuthSuccessCalled);
+
+      // THEN both successCallbacks fire and no "No callback received"
+      // warning is logged.
+      return await TestHelper.delayed(100, () => {
+        expect(successCallback1).toBeCalled();
+        expect(successCallback2).toBeCalled();
+        expect(failureCallback1).not.toBeCalled();
+        expect(failureCallback2).not.toBeCalled();
+        const noCallbackCalls = logSpy.mock.calls.filter(
+          (args) =>
+            typeof args[0] === 'string' &&
+            args[0].includes('No callback received from native layer')
+        );
+        expect(noCallbackCalls).toHaveLength(0);
+        logSpy.mockRestore();
       });
     });
   });

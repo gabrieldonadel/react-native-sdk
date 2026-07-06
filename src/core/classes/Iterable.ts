@@ -28,20 +28,6 @@ const RNEventEmitter = new NativeEventEmitter(RNIterableAPI);
 const defaultConfig = new IterableConfig();
 
 /**
- * Fallback safety-net timeout for the auth callback latch when no native
- * auth success/failure event arrives. Overridable via
- * {@link IterableConfig.authCallbackTimeoutMs}.
- */
-const AUTH_CALLBACK_TIMEOUT_DEFAULT_MS = 1000;
-
-/**
- * Default delay (ms) the SDK waits on Android before invoking the URL handler
- * so the host Activity can wake from the background. Overridable via
- * {@link IterableConfig.androidWakeDelayMs}.
- */
-const ANDROID_WAKE_DELAY_DEFAULT_MS = 1000;
-
-/**
  * Checks if the response is an IterableAuthResponse
  */
 const isIterableAuthResponse = (
@@ -1027,9 +1013,7 @@ export class Iterable {
           // dispatching the URL to the handler. Without this delay the
           // handler can race the activity lifecycle and drop the link on
           // cold start. Tunable via IterableConfig.androidWakeDelayMs.
-          const wakeDelayMs =
-            Iterable.savedConfig.androidWakeDelayMs ??
-            ANDROID_WAKE_DELAY_DEFAULT_MS;
+          const wakeDelayMs = Iterable.savedConfig.androidWakeDelayMs;
           if (wakeDelayMs > 0) {
             setTimeout(() => {
               callUrlHandler(Iterable.savedConfig, url, context);
@@ -1074,26 +1058,42 @@ export class Iterable {
         | IterableAuthResponseResult
         | typeof AUTH_RESULT_NO_CALLBACK;
 
-      // Event-driven auth latch. The native success/failure listeners
-      // resolve the latch when their event arrives; the safety-net timer
-      // resolves it only if no native event arrives within the configured
-      // window. The timer is a fallback — the latch resolves immediately
-      // when the native event fires.
+      // Per-invocation auth latch state. The native success/failure events
+      // resolve the latch when they arrive; the safety-net timer resolves it
+      // only if no native event arrives within the configured window. The
+      // timer is a fallback — the latch resolves immediately when the native
+      // event fires.
       //
-      // `pendingAuthResult` buffers a native result that arrives before the
+      // `pendingResult` buffers a native result that arrives before the
       // latch is created (e.g. the authHandler promise hasn't settled yet).
       // It is consumed when the latch is created, so out-of-order events
       // are not lost.
-      let authLatchResolver:
-        | ((result: IterableAuthResponseResult) => void)
-        | null = null;
-      let pendingAuthResult: IterableAuthResponseResult | null = null;
+      //
+      // State is scoped per `handleAuthCalled` invocation so overlapping
+      // invocations cannot wipe each other's resolver or buffered result
+      // (the bug with the original shared `authLatchResolver` /
+      // `pendingAuthResult` declarations). The bridge events carry no
+      // correlation id, so native success/failure events are routed to the
+      // oldest still-pending invocation in FIFO order — matching the
+      // original single-flight assumption that native processes auth
+      // requests in the order the SDK issues them.
+      type AuthInvocation = {
+        resolver:
+          | ((result: IterableAuthResponseResult) => void)
+          | null;
+        pendingResult: IterableAuthResponseResult | null;
+      };
+      const pendingAuthInvocations: AuthInvocation[] = [];
 
       RNEventEmitter.addListener(IterableEventName.handleAuthCalled, () => {
-        // Reset per-invocation state so a stale buffered result from a
-        // previous invocation cannot bleed into this one.
-        authLatchResolver = null;
-        pendingAuthResult = null;
+        // Start a fresh per-invocation state object so a stale buffered
+        // result or resolver from a previous invocation cannot bleed into
+        // this one.
+        const invocation: AuthInvocation = {
+          resolver: null,
+          pendingResult: null,
+        };
+        pendingAuthInvocations.push(invocation);
 
         // MOB-10423: Check if we can use chain operator (?.) here instead
         // Asks frontend of the client/app to pass authToken
@@ -1109,23 +1109,27 @@ export class Iterable {
             if (isIterableAuthResponse(promiseResult)) {
               Iterable.authManager.passAlongAuthToken(promiseResult.authToken);
 
+              // If this invocation was already removed (e.g. a buffered
+              // native result already resolved it via another path), do not
+              // wire a latch for it.
+              if (!pendingAuthInvocations.includes(invocation)) {
+                return;
+              }
+
               const nativeLatch = new Promise<IterableAuthResponseResult>(
                 (resolve) => {
-                  if (pendingAuthResult !== null) {
+                  if (invocation.pendingResult !== null) {
                     // A native event arrived before the latch was created;
                     // resolve immediately with the buffered result.
-                    const buffered = pendingAuthResult;
-                    pendingAuthResult = null;
-                    resolve(buffered);
+                    resolve(invocation.pendingResult);
+                    invocation.pendingResult = null;
                   } else {
-                    authLatchResolver = resolve;
+                    invocation.resolver = resolve;
                   }
                 }
               );
 
-              const timeoutMs =
-                Iterable.savedConfig.authCallbackTimeoutMs ??
-                AUTH_CALLBACK_TIMEOUT_DEFAULT_MS;
+              const timeoutMs = Iterable.savedConfig.authCallbackTimeoutMs;
               const timeoutLatch = new Promise<AuthLatchResult>((resolve) => {
                 setTimeout(
                   () => resolve(AUTH_RESULT_NO_CALLBACK),
@@ -1135,10 +1139,19 @@ export class Iterable {
 
               Promise.race<AuthLatchResult>([nativeLatch, timeoutLatch]).then(
                 (result) => {
-                  // Clear the resolver so a late native event after the timeout
-                  // is a no-op.
-                  authLatchResolver = null;
-                  pendingAuthResult = null;
+                  // Clear this invocation's resolver so a late native event
+                  // after the timeout is a no-op. Only touch this
+                  // invocation's state — other invocations own their own.
+                  invocation.resolver = null;
+                  invocation.pendingResult = null;
+                  // Defensive cleanup: if the native event did not remove
+                  // this invocation from the queue (e.g. the safety-net
+                  // timer won the race), remove it now so future native
+                  // events route to the next pending invocation.
+                  const index = pendingAuthInvocations.indexOf(invocation);
+                  if (index !== -1) {
+                    pendingAuthInvocations.splice(index, 1);
+                  }
                   if (result === IterableAuthResponseResult.SUCCESS) {
                     promiseResult.successCallback?.();
                   } else if (result === IterableAuthResponseResult.FAILURE) {
@@ -1170,32 +1183,46 @@ export class Iterable {
       RNEventEmitter.addListener(
         IterableEventName.handleAuthSuccessCalled,
         () => {
+          // Route to the oldest still-pending invocation (FIFO). The bridge
+          // events carry no correlation id; this matches the assumption
+          // that native processes auth requests in issuance order.
+          const invocation = pendingAuthInvocations[0];
+          if (!invocation) {
+            return;
+          }
           // Resolve the pending auth latch immediately; the timer becomes a
           // no-op for this invocation.
-          if (authLatchResolver) {
-            const resolve = authLatchResolver;
-            authLatchResolver = null;
-            pendingAuthResult = null;
+          if (invocation.resolver) {
+            const resolve = invocation.resolver;
+            invocation.resolver = null;
+            invocation.pendingResult = null;
+            // Remove synchronously so the next native event routes to the
+            // following pending invocation, not back to this one.
+            pendingAuthInvocations.shift();
             resolve(IterableAuthResponseResult.SUCCESS);
           } else {
             // Latch not created yet — buffer the result for the latch.
-            pendingAuthResult = IterableAuthResponseResult.SUCCESS;
+            invocation.pendingResult = IterableAuthResponseResult.SUCCESS;
           }
         }
       );
       RNEventEmitter.addListener(
         IterableEventName.handleAuthFailureCalled,
         (authFailureResponse: IterableAuthFailure) => {
-          // Resolve the pending auth latch immediately; the timer becomes a
-          // no-op for this invocation.
-          if (authLatchResolver) {
-            const resolve = authLatchResolver;
-            authLatchResolver = null;
-            pendingAuthResult = null;
-            resolve(IterableAuthResponseResult.FAILURE);
-          } else {
-            // Latch not created yet — buffer the result for the latch.
-            pendingAuthResult = IterableAuthResponseResult.FAILURE;
+          const invocation = pendingAuthInvocations[0];
+          if (invocation) {
+            // Resolve the pending auth latch immediately; the timer becomes a
+            // no-op for this invocation.
+            if (invocation.resolver) {
+              const resolve = invocation.resolver;
+              invocation.resolver = null;
+              invocation.pendingResult = null;
+              pendingAuthInvocations.shift();
+              resolve(IterableAuthResponseResult.FAILURE);
+            } else {
+              // Latch not created yet — buffer the result for the latch.
+              invocation.pendingResult = IterableAuthResponseResult.FAILURE;
+            }
           }
 
           // Call the actual JWT error with `authFailure` object.

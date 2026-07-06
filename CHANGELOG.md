@@ -17,8 +17,10 @@
   - Added `IterableConfig.androidWakeDelayMs` (default `1000`) to tune the
     Android deep-link wake delay before the SDK invokes `urlHandler`. Set to
     `0` to dispatch synchronously.
-  - Added `IterableConfig.authCallbackTimeoutMs` (default `1000`) to tune the
-    safety-net timeout for the auth callback latch.
+  - Added `IterableConfig.authCallbackTimeoutMs` (default `6000`) to tune the
+    safety-net timeout for the auth callback latch. The default is chosen to
+    comfortably exceed typical mobile auth round-trips while staying well
+    below the native 30s auth latch ceiling on both iOS and Android.
   - The auth callback gate is now event-driven: the native
     `handleAuthSuccessCalled` / `handleAuthFailureCalled` events resolve the
     latch immediately. The timer survives only as a fallback when no native

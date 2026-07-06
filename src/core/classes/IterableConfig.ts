@@ -372,19 +372,24 @@ export class IterableConfig {
    * resolves immediately when the native event arrives.
    *
    * @remarks
-   * Increase this value on networks or devices where native auth round-trips
-   * are slow. Setting it too low can cause premature "no callback received"
-   * warnings. Setting it too high increases perceived auth latency only when
-   * the native layer fails to respond.
+   * The default (`6000`) is chosen to comfortably exceed a typical mobile
+   * auth round-trip (the native layer performs `passAlongAuthToken` plus a
+   * full HTTP round-trip to the Iterable backend, which routinely exceeds
+   * 1 s on real networks) while staying well below the native auth latch
+   * ceiling of 30 s on both iOS and Android. Setting it below typical
+   * round-trip latency causes the safety net to win the race and drop the
+   * late native `successCallback` / `failureCallback`; setting it too high
+   * increases perceived auth latency only when the native layer fails to
+   * respond.
    *
    * @example
    * ```typescript
    * const config = new IterableConfig();
-   * config.authCallbackTimeoutMs = 2000; // wait up to 2s for native auth events
+   * config.authCallbackTimeoutMs = 10000; // allow up to 10s for slow networks
    * Iterable.initialize('<YOUR_API_KEY>', config);
    * ```
    */
-  authCallbackTimeoutMs = 1000;
+  authCallbackTimeoutMs = 6000;
 
   /**
    * Should the SDK enable and use embedded messaging?
