@@ -30,6 +30,39 @@ interface EmbeddedMessage {
   payload?: { [key: string]: string | number | boolean | null } | null;
 }
 
+// Inbound fixed-shape structs. Keys are the source of truth and MUST stay in sync
+// with the native decoders that read by string key. See the native `Serialization`
+// files (iOS: ios/RNIterableAPI/Serialization.swift; Android:
+// android/.../Serialization.java) for the authoritative key list per struct:
+//   - CommerceItemSpec ↔ CommerceItem
+//   - InboxImpressionRowSpec ↔ InboxImpressionTracker.RowInfo
+// `dataFields` is `unknown` (not a typed dict): IterableCommerceItem.dataFields is
+// typed `unknown` and is an open consumer-supplied data bag. Codegen accepts
+// `unknown` (maps to GenericObjectTypeAnnotation, same as `Object`).
+interface CommerceItemSpec {
+  id: string;
+  name: string;
+  price: number;
+  quantity: number;
+  sku?: string | null;
+  description?: string | null;
+  url?: string | null;
+  imageUrl?: string | null;
+  categories?: Array<string> | null;
+  dataFields?: unknown;
+}
+
+interface AttributionInfoSpec {
+  campaignId: number;
+  templateId: number;
+  messageId: string;
+}
+
+interface InboxImpressionRowSpec {
+  messageId: string;
+  silentInbox: boolean;
+}
+
 export interface Spec extends TurboModule {
   // Initialization
   initializeWithApiKey(
@@ -94,12 +127,10 @@ export interface Spec extends TurboModule {
   inAppConsume(messageId: string, location: number, source: number): void;
 
   // Commerce
-  updateCart(
-    items: Array<{ [key: string]: string | number | boolean }>
-  ): void;
+  updateCart(items: Array<CommerceItemSpec>): void;
   trackPurchase(
     total: number,
-    items: Array<{ [key: string]: string | number | boolean }>,
+    items: Array<CommerceItemSpec>,
     dataFields?: { [key: string]: string | number | boolean }
   ): void;
 
@@ -111,12 +142,8 @@ export interface Spec extends TurboModule {
   updateEmail(email: string, authToken?: string): void;
 
   // Attribution
-  getAttributionInfo(): Promise<{
-    [key: string]: string | number | boolean;
-  } | null>;
-  setAttributionInfo(
-    dict: { [key: string]: string | number | boolean } | null
-  ): void;
+  getAttributionInfo(): Promise<AttributionInfoSpec | null>;
+  setAttributionInfo(dict: AttributionInfoSpec | null): void;
 
   // Device management
   disableDeviceForCurrentUser(): void;
@@ -144,12 +171,10 @@ export interface Spec extends TurboModule {
   ): void;
 
   // Session tracking
-  startSession(
-    visibleRows: Array<{ [key: string]: string | number | boolean }>
-  ): void;
+  startSession(visibleRows: Array<InboxImpressionRowSpec>): void;
   endSession(): void;
   updateVisibleRows(
-    visibleRows: Array<{ [key: string]: string | number | boolean }>
+    visibleRows: Array<InboxImpressionRowSpec>
   ): void;
 
   // Auth
