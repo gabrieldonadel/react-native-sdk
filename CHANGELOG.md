@@ -27,6 +27,12 @@
     event arrives within the configured window, instead of being the primary
     resolution mechanism.
 
+### Internal
+
+- Tightened TurboModule spec type safety in `NativeRNIterableAPI.ts` (SDK-521, Phase 1).
+  - Replaced `{ [key: string]: string | number | boolean }` dictionaries on the fixed-shape bridge methods (`updateCart`, `trackPurchase`, `setAttributionInfo`, `getAttributionInfo`, `startSession`, `updateVisibleRows`) with inline interfaces (`CommerceItemSpec`, `AttributionInfoSpec`, `InboxImpressionRowSpec`).
+  - No runtime behavior change; native layers read by string key as before. Public facade signatures (`IterableCommerceItem`, `IterableAttributionInfo`, `IterableInboxImpressionRowInfo`) are unchanged and remain structurally compatible — no casts required.
+
 ## 3.0.1
 
 ### Updates
