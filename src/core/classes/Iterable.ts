@@ -1095,6 +1095,18 @@ export class Iterable {
         };
         pendingAuthInvocations.push(invocation);
 
+        // Drop this invocation from the FIFO queue. The bridge events carry
+        // no correlation id, so a late native event for this invocation may
+        // route to the new queue head — a pre-existing bridge limitation that
+        // is strictly better than leaving a zombie at head (which would
+        // deterministically block the next real callback).
+        const removeInvocation = () => {
+          const index = pendingAuthInvocations.indexOf(invocation);
+          if (index !== -1) {
+            pendingAuthInvocations.splice(index, 1);
+          }
+        };
+
         // MOB-10423: Check if we can use chain operator (?.) here instead
         // Asks frontend of the client/app to pass authToken
         Iterable.savedConfig.authHandler!()
@@ -1167,17 +1179,23 @@ export class Iterable {
             } else if (typeof promiseResult === 'string') {
               // If promise only returns string
               Iterable.authManager.passAlongAuthToken(promiseResult);
+              removeInvocation();
             } else if (promiseResult === null || promiseResult === undefined) {
               // Even though this will cause authentication to fail, we want to
               // allow for this for JWT handling.
               Iterable.authManager.passAlongAuthToken(promiseResult);
+              removeInvocation();
             } else {
               IterableLogger?.log(
                 'Unexpected promise returned. Auth token expects promise of String, null, undefined, or AuthResponse type.'
               );
+              removeInvocation();
             }
           })
-          .catch((e) => IterableLogger?.log(e));
+          .catch((e) => {
+            IterableLogger?.log(e);
+            removeInvocation();
+          });
       });
 
       RNEventEmitter.addListener(

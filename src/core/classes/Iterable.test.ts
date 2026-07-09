@@ -1998,5 +1998,86 @@ describe('Iterable', () => {
         logSpy.mockRestore();
       });
     });
+
+    it('should not block the next callback when authHandler rejects (SDK-520 follow-up regression)', async () => {
+      // Regression for the zombie-invocation bug: when an authHandler
+      // rejects, the .catch path previously left the invocation at the head
+      // of pendingAuthInvocations. The late native event for the rejected
+      // invocation buffered into the zombie, so the next real invocation's
+      // native success event routed to the zombie and its successCallback
+      // was silently dropped. With removeInvocation() in the .catch path,
+      // the rejected invocation is dropped from the queue before native's
+      // late event arrives, so the next invocation's native event routes
+      // correctly.
+      const nativeEmitter = new NativeEventEmitter();
+      nativeEmitter.removeAllListeners(IterableEventName.handleAuthCalled);
+      nativeEmitter.removeAllListeners(
+        IterableEventName.handleAuthSuccessCalled
+      );
+      nativeEmitter.removeAllListeners(
+        IterableEventName.handleAuthFailureCalled
+      );
+
+      const config = new IterableConfig();
+      config.logReactNativeSdkCalls = false;
+      config.authCallbackTimeoutMs = 2000;
+
+      const successCallback2 = jest.fn();
+      const failureCallback2 = jest.fn();
+      const authResponse2 = new IterableAuthResponse();
+      authResponse2.authToken = 'retry-success-token';
+      authResponse2.successCallback = successCallback2;
+      authResponse2.failureCallback = failureCallback2;
+
+      // inv1 rejects (authHandler throws); inv2 resolves with an
+      // IterableAuthResponse. Controllable promises let us sequence the
+      // second resolve after the first rejection has settled.
+      let resolveAuth2: (value: IterableAuthResponse) => void = () => {};
+      let callCount = 0;
+      config.authHandler = jest.fn(() => {
+        callCount += 1;
+        if (callCount === 1) {
+          return Promise.reject(new Error('Auth failed (inv1)'));
+        }
+        return new Promise<IterableAuthResponse>((resolve) => {
+          resolveAuth2 = resolve;
+        });
+      });
+
+      const logSpy = jest.spyOn(IterableLogger, 'log');
+
+      Iterable.initialize('apiKey', config);
+
+      // WHEN the first handleAuthCalled fires and authHandler rejects.
+      // The .catch path must remove inv1 from the queue.
+      nativeEmitter.emit(IterableEventName.handleAuthCalled);
+      // Let the rejection settle (microtask queue flush).
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // WHEN a second handleAuthCalled fires and authHandler resolves with
+      // an IterableAuthResponse, wiring inv2's latch.
+      nativeEmitter.emit(IterableEventName.handleAuthCalled);
+      resolveAuth2(authResponse2);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // THEN the native success event for inv2 routes to inv2 (not to a
+      // zombie at queue head) and inv2's successCallback fires.
+      nativeEmitter.emit(IterableEventName.handleAuthSuccessCalled);
+
+      return await TestHelper.delayed(50, () => {
+        expect(successCallback2).toBeCalled();
+        expect(failureCallback2).not.toBeCalled();
+        // No "No callback received" warning: if inv1 had stayed at queue
+        // head, inv2's native event would have routed to the zombie and
+        // inv2's safety-net timer would have fired NO_CALLBACK.
+        const noCallbackCalls = logSpy.mock.calls.filter(
+          (args) =>
+            typeof args[0] === 'string' &&
+            args[0].includes('No callback received from native layer')
+        );
+        expect(noCallbackCalls).toHaveLength(0);
+        logSpy.mockRestore();
+      });
+    });
   });
 });
