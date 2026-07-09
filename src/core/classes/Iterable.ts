@@ -1009,10 +1009,18 @@ export class Iterable {
         Iterable.wakeApp();
 
         if (Platform.OS === 'android') {
-          //Give enough time for Activity to wake up.
-          setTimeout(() => {
+          // Give the host Activity time to wake from the background before
+          // dispatching the URL to the handler. Without this delay the
+          // handler can race the activity lifecycle and drop the link on
+          // cold start. Tunable via IterableConfig.androidWakeDelayMs.
+          const wakeDelayMs = Iterable.savedConfig.androidWakeDelayMs;
+          if (wakeDelayMs > 0) {
+            setTimeout(() => {
+              callUrlHandler(Iterable.savedConfig, url, context);
+            }, wakeDelayMs);
+          } else {
             callUrlHandler(Iterable.savedConfig, url, context);
-          }, 1000);
+          }
         } else {
           callUrlHandler(Iterable.savedConfig, url, context);
         }
@@ -1043,66 +1051,197 @@ export class Iterable {
     }
 
     if (Iterable.savedConfig.authHandler) {
-      let authResponseCallback: IterableAuthResponseResult;
+      // Sentinel for the safety-net timeout path, distinct from the native
+      // SUCCESS / FAILURE results.
+      const AUTH_RESULT_NO_CALLBACK = 'NO_CALLBACK';
+      type AuthLatchResult =
+        | IterableAuthResponseResult
+        | typeof AUTH_RESULT_NO_CALLBACK;
+
+      // Per-invocation auth latch state. The native success/failure events
+      // resolve the latch when they arrive; the safety-net timer resolves it
+      // only if no native event arrives within the configured window. The
+      // timer is a fallback — the latch resolves immediately when the native
+      // event fires.
+      //
+      // `pendingResult` buffers a native result that arrives before the
+      // latch is created (e.g. the authHandler promise hasn't settled yet).
+      // It is consumed when the latch is created, so out-of-order events
+      // are not lost.
+      //
+      // State is scoped per `handleAuthCalled` invocation so overlapping
+      // invocations cannot wipe each other's resolver or buffered result
+      // (the bug with the original shared `authLatchResolver` /
+      // `pendingAuthResult` declarations). The bridge events carry no
+      // correlation id, so native success/failure events are routed to the
+      // oldest still-pending invocation in FIFO order — matching the
+      // original single-flight assumption that native processes auth
+      // requests in the order the SDK issues them.
+      type AuthInvocation = {
+        resolver:
+          | ((result: IterableAuthResponseResult) => void)
+          | null;
+        pendingResult: IterableAuthResponseResult | null;
+      };
+      const pendingAuthInvocations: AuthInvocation[] = [];
+
       RNEventEmitter.addListener(IterableEventName.handleAuthCalled, () => {
+        // Start a fresh per-invocation state object so a stale buffered
+        // result or resolver from a previous invocation cannot bleed into
+        // this one.
+        const invocation: AuthInvocation = {
+          resolver: null,
+          pendingResult: null,
+        };
+        pendingAuthInvocations.push(invocation);
+
+        // Drop this invocation from the FIFO queue. The bridge events carry
+        // no correlation id, so a late native event for this invocation may
+        // route to the new queue head — a pre-existing bridge limitation that
+        // is strictly better than leaving a zombie at head (which would
+        // deterministically block the next real callback).
+        const removeInvocation = () => {
+          const index = pendingAuthInvocations.indexOf(invocation);
+          if (index !== -1) {
+            pendingAuthInvocations.splice(index, 1);
+          }
+        };
+
         // MOB-10423: Check if we can use chain operator (?.) here instead
         // Asks frontend of the client/app to pass authToken
         Iterable.savedConfig.authHandler!()
           .then((promiseResult) => {
             // Promise result can be either just String OR of type AuthResponse.
-            // If type AuthReponse, authToken will be parsed looking for `authToken` within promised object. Two additional listeners will be registered for success and failure callbacks sent by native bridge layer.
+            // If type AuthResponse, authToken will be parsed looking for
+            // `authToken` within promised object. A latch is created and raced
+            // against a safety-net timeout: the native success/failure events
+            // resolve the latch immediately, while the timer only fires if no
+            // native event arrives within the configured window.
             // Else it will be looked for as a String.
             if (isIterableAuthResponse(promiseResult)) {
               Iterable.authManager.passAlongAuthToken(promiseResult.authToken);
 
-              setTimeout(() => {
-                if (
-                  authResponseCallback === IterableAuthResponseResult.SUCCESS
-                ) {
-                  if (promiseResult.successCallback) {
-                    promiseResult.successCallback?.();
+              // If this invocation was already removed (e.g. a buffered
+              // native result already resolved it via another path), do not
+              // wire a latch for it.
+              if (!pendingAuthInvocations.includes(invocation)) {
+                return;
+              }
+
+              const nativeLatch = new Promise<IterableAuthResponseResult>(
+                (resolve) => {
+                  if (invocation.pendingResult !== null) {
+                    // A native event arrived before the latch was created;
+                    // resolve immediately with the buffered result.
+                    resolve(invocation.pendingResult);
+                    invocation.pendingResult = null;
+                  } else {
+                    invocation.resolver = resolve;
                   }
-                } else if (
-                  authResponseCallback === IterableAuthResponseResult.FAILURE
-                ) {
-                  // We are currently only reporting JWT related errors.  In
-                  // the future, we should handle other types of errors as well.
-                  if (promiseResult.failureCallback) {
-                    promiseResult.failureCallback?.();
-                  }
-                } else {
-                  IterableLogger?.log('No callback received from native layer');
                 }
-              }, 1000);
+              );
+
+              const timeoutMs = Iterable.savedConfig.authCallbackTimeoutMs;
+              const timeoutLatch = new Promise<AuthLatchResult>((resolve) => {
+                setTimeout(
+                  () => resolve(AUTH_RESULT_NO_CALLBACK),
+                  timeoutMs
+                );
+              });
+
+              Promise.race<AuthLatchResult>([nativeLatch, timeoutLatch]).then(
+                (result) => {
+                  // Clear this invocation's resolver so a late native event
+                  // after the timeout is a no-op. Only touch this
+                  // invocation's state — other invocations own their own.
+                  invocation.resolver = null;
+                  invocation.pendingResult = null;
+                  // Defensive cleanup: if the native event did not remove
+                  // this invocation from the queue (e.g. the safety-net
+                  // timer won the race), remove it now so future native
+                  // events route to the next pending invocation.
+                  const index = pendingAuthInvocations.indexOf(invocation);
+                  if (index !== -1) {
+                    pendingAuthInvocations.splice(index, 1);
+                  }
+                  if (result === IterableAuthResponseResult.SUCCESS) {
+                    promiseResult.successCallback?.();
+                  } else if (result === IterableAuthResponseResult.FAILURE) {
+                    // We are currently only reporting JWT related errors. In
+                    // the future, we should handle other types of errors as
+                    // well.
+                    promiseResult.failureCallback?.();
+                  } else {
+                    IterableLogger?.log('No callback received from native layer');
+                  }
+                }
+              );
             } else if (typeof promiseResult === 'string') {
               // If promise only returns string
               Iterable.authManager.passAlongAuthToken(promiseResult);
+              removeInvocation();
             } else if (promiseResult === null || promiseResult === undefined) {
               // Even though this will cause authentication to fail, we want to
               // allow for this for JWT handling.
               Iterable.authManager.passAlongAuthToken(promiseResult);
+              removeInvocation();
             } else {
               IterableLogger?.log(
                 'Unexpected promise returned. Auth token expects promise of String, null, undefined, or AuthResponse type.'
               );
+              removeInvocation();
             }
           })
-          .catch((e) => IterableLogger?.log(e));
+          .catch((e) => {
+            IterableLogger?.log(e);
+            removeInvocation();
+          });
       });
 
       RNEventEmitter.addListener(
         IterableEventName.handleAuthSuccessCalled,
         () => {
-          authResponseCallback = IterableAuthResponseResult.SUCCESS;
+          // Route to the oldest still-pending invocation (FIFO). The bridge
+          // events carry no correlation id; this matches the assumption
+          // that native processes auth requests in issuance order.
+          const invocation = pendingAuthInvocations[0];
+          if (!invocation) {
+            return;
+          }
+          // Resolve the pending auth latch immediately; the timer becomes a
+          // no-op for this invocation.
+          if (invocation.resolver) {
+            const resolve = invocation.resolver;
+            invocation.resolver = null;
+            invocation.pendingResult = null;
+            // Remove synchronously so the next native event routes to the
+            // following pending invocation, not back to this one.
+            pendingAuthInvocations.shift();
+            resolve(IterableAuthResponseResult.SUCCESS);
+          } else {
+            // Latch not created yet — buffer the result for the latch.
+            invocation.pendingResult = IterableAuthResponseResult.SUCCESS;
+          }
         }
       );
       RNEventEmitter.addListener(
         IterableEventName.handleAuthFailureCalled,
         (authFailureResponse: IterableAuthFailure) => {
-          // Mark the flag for above listener to indicate something failed.
-          // `catch(err)` will only indicate failure on high level. No actions
-          // should be taken inside `catch(err)`.
-          authResponseCallback = IterableAuthResponseResult.FAILURE;
+          const invocation = pendingAuthInvocations[0];
+          if (invocation) {
+            // Resolve the pending auth latch immediately; the timer becomes a
+            // no-op for this invocation.
+            if (invocation.resolver) {
+              const resolve = invocation.resolver;
+              invocation.resolver = null;
+              invocation.pendingResult = null;
+              pendingAuthInvocations.shift();
+              resolve(IterableAuthResponseResult.FAILURE);
+            } else {
+              // Latch not created yet — buffer the result for the latch.
+              invocation.pendingResult = IterableAuthResponseResult.FAILURE;
+            }
+          }
 
           // Call the actual JWT error with `authFailure` object.
           Iterable.savedConfig?.onJwtError?.(authFailureResponse);
