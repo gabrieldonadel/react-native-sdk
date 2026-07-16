@@ -26,6 +26,9 @@ jobs:
       - name: Typecheck files
         run: yarn typecheck
 
+      - name: Check circular dependencies
+        run: yarn check:circular
+
   test:
     runs-on: ubuntu-latest
     steps:
