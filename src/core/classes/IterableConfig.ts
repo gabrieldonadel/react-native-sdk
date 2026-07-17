@@ -449,47 +449,30 @@ export class IterableConfig {
       inAppDisplayInterval: this.inAppDisplayInterval,
       /**
        * A boolean indicating if a URL handler is present.
-       *
-       * TODO: Figure out if this is purposeful
        */
-      // eslint-disable-next-line eqeqeq
-      urlHandlerPresent: this.urlHandler != undefined,
+      urlHandlerPresent: this.urlHandler !== undefined,
       /**
        * A boolean indicating if a custom action handler is present.
-       *
-       * TODO: Figure out if this is purposeful
        */
-      // eslint-disable-next-line eqeqeq
-      customActionHandlerPresent: this.customActionHandler != undefined,
+      customActionHandlerPresent: this.customActionHandler !== undefined,
       /**
        * A boolean indicating if an in-app handler is present.
-       *
-       * TODO: Figure out if this is purposeful
        */
-      // eslint-disable-next-line eqeqeq
-      inAppHandlerPresent: this.inAppHandler != undefined,
+      inAppHandlerPresent: this.inAppHandler !== undefined,
       /**
        * A boolean indicating if an authentication handler is present.
-       *
-       * TODO: Figure out if this is purposeful
        */
-      // eslint-disable-next-line eqeqeq
-      authHandlerPresent: this.authHandler != undefined,
+      authHandlerPresent: this.authHandler !== undefined,
       /**
        * A boolean indicating if an embedded message update callback is present.
-       *
-       * TODO: Figure out if this is purposeful
        */
-      // eslint-disable-next-line eqeqeq
-      onEmbeddedMessageUpdatePresent: this.onEmbeddedMessageUpdate != undefined,
+      onEmbeddedMessageUpdatePresent:
+        this.onEmbeddedMessageUpdate !== undefined,
       /**
        * A boolean indicating if an embedded messaging disabled callback is present.
-       *
-       * TODO: Figure out if this is purposeful
        */
-      // eslint-disable-next-line eqeqeq
       onEmbeddedMessagingDisabledPresent:
-        this.onEmbeddedMessagingDisabled != undefined,
+        this.onEmbeddedMessagingDisabled !== undefined,
       /** The log level for the SDK. */
       logLevel: this.logLevel,
       expiringAuthTokenRefreshPeriod: this.expiringAuthTokenRefreshPeriod,
