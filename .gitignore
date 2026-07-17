@@ -96,8 +96,8 @@ docs/
 .metals/
 
 # Agents
-.agent/
 .claude/
+.agent/
 .cursor/
 .opencode/
 .pi/
