@@ -2,11 +2,11 @@
   "name": "@iterable/react-native-sdk",
   "version": "3.1.0",
   "description": "Iterable SDK for React Native.",
-  "source": "./src/index.tsx",
   "main": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",
   "exports": {
     ".": {
+      "iterable-react-native-sdk-source": "./src/index.tsx",
       "types": "./lib/typescript/src/index.d.ts",
       "default": "./lib/module/index.js"
     },
@@ -99,7 +99,7 @@
     "prettier-eslint": "^16.4.2",
     "react": "19.2.3",
     "react-native": "0.85.3",
-    "react-native-builder-bob": "^0.40.4",
+    "react-native-builder-bob": "^0.43.0",
     "react-native-gesture-handler": "^2.30.0",
     "react-native-safe-area-context": "^5.6.0",
     "react-native-screens": ">=4.19.0 <4.25.0",
