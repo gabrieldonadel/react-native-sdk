@@ -78,7 +78,7 @@
     "@react-native/metro-config": "0.85.3",
     "@react-native/typescript-config": "0.85.3",
     "@react-navigation/native": "^7.1.14",
-    "@release-it/conventional-changelog": "^9.0.4",
+    "@release-it/conventional-changelog": "^11.0.1",
     "@testing-library/react-native": "^13.3.3",
     "@types/jest": "^29.5.14",
     "@types/react": "^19.2.0",
@@ -86,6 +86,7 @@
     "@typescript-eslint/parser": "^8.13.0",
     "baseline-browser-mapping": "^2.10.29",
     "commitlint": "^19.6.1",
+    "conventional-changelog-conventionalcommits": "^9.3.1",
     "del-cli": "^5.1.0",
     "dpdm": "^4.2.0",
     "eslint": "^9.39.5",
@@ -104,7 +105,7 @@
     "react-native-screens": ">=4.19.0 <4.25.0",
     "react-native-webview": "^13.14.1",
     "react-test-renderer": "19.2.3",
-    "release-it": "^17.10.0",
+    "release-it": "^20.2.1",
     "turbo": "^1.10.7",
     "typedoc": "^0.28.13",
     "typedoc-plugin-coverage": "^3.3.0",
@@ -155,17 +156,20 @@
     },
     "plugins": {
       "@release-it/conventional-changelog": {
-        "preset": "angular",
-        "types": [
-          {
-            "type": "feat",
-            "section": "Features"
-          },
-          {
-            "type": "fix",
-            "section": "Bug Fixes"
-          }
-        ]
+        "preset": {
+          "name": "conventionalcommits",
+          "types": [
+            {
+              "type": "feat",
+              "section": "Features"
+            },
+            {
+              "type": "fix",
+              "section": "Bug Fixes"
+            }
+          ]
+        },
+        "infile": "CHANGELOG.md"
       }
     }
   },
